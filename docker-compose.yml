@@ -1,0 +1,53 @@
+services:
+    db:
+        image: mysql:lts
+        command:
+            - --sql_mode=ALLOW_INVALID_DATES
+        ports:
+            - "3310:3306"
+        environment:
+            MYSQL_ROOT_PASSWORD: root
+            MYSQL_USER: symfony
+            MYSQL_PASSWORD: symfony
+        deploy:
+            resources:
+                limits:
+                    memory: 1024M
+        ulimits:
+            nofile: # Fix memory leak issue on some systems when LimitCORE=infinity (containerd)
+                soft: 1048576
+                hard: 1048576
+        volumes:
+            - ./data:/var/lib/mysql
+    php:
+        build: ./php-fpm
+        ports:
+            - "9008:9000"
+        volumes:
+            - ./symfony:/var/www/symfony:cached
+            - ./logs/symfony:/var/www/symfony/var/log:cached
+        links:
+            - db
+            - memcached
+        extra_hosts:
+            - "docker-host.localhost:127.0.0.1"
+            - "swiss_map.localhost:172.24.0.5"
+    nginx:
+        build: ./nginx
+        ports:
+            - "88:80"
+        links:
+            - php
+        volumes:
+            - ./logs/nginx:/var/log/nginx:cached
+            - ./symfony:/var/www/symfony:cached
+    memcached:
+        image: memcached:latest
+        command:
+            - memcached
+            - -I 1024M
+            - -m 16536M
+        ports:
+            - "11211:11211"
+        extra_hosts:
+            - "memcached.localhost:172.24.0.6"

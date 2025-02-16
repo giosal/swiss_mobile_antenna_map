@@ -1,0 +1,210 @@
+image: docker.distantaccess.com:5000/iotlab-php84-node22-gitlab-ci:latest
+
+# Variables and root user used
+variables:
+    MYSQL_USER: ci-db-user
+    MYSQL_PASSWORD: ci-db-password
+    MYSQL_ROOT_PASSWORD: ci-db-password
+    MYSQL_DATABASE: ci-db-name-app
+    DATABASE_HOST: mariadb
+    DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@${DATABASE_HOST}/${MYSQL_DATABASE}?serverVersion=8.0"
+    READONLY_DATABASE_URL: "mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@${DATABASE_HOST}:3306/${MYSQL_DATABASE}?serverVersion=10.11.5-MariaDB"
+    ARTIFACT_REPO: "git@gitlab.distantaccess.com:gsalukvadze/udggui-symfony6-artifact.git"
+
+
+stages:
+    - check_release
+    - test
+    - pack
+
+before_script:
+    - cd symfony
+    - composer self-update --2
+    - composer install --no-interaction --optimize-autoloader --no-progress --no-scripts
+
+cache: &global_cache
+    key: ${CI_PROJECT_PATH_SLUG}
+    paths:
+        - vendor/
+        - node_modules/
+        - .php-cs-fixer.cache
+        - .phpunit.cache
+        - public/build
+        - tests-output
+
+
+check_release:app:
+    stage: check_release
+
+    cache:
+        <<: *global_cache
+        policy: pull-push
+
+    services:
+        - name: mariadb:10.5.21
+          command: [ "--default-authentication-plugin=mysql_native_password" ]
+
+    only:
+        - /^(release\/)?\d+\.\d+\.\d+(-rc\d+)?$/ # allows refs (tag or branch) looking EXACTLY like "(release/)12.1.32(-rc12)" WHERE (release/) and (-rc12) are optional
+
+    script:
+        - ./vendor/bin/php-cs-fixer fix -v --dry-run --stop-on-violation
+        - ping -c 3 $DATABASE_HOST
+        - php bin/console doctrine:database:create --env=test --if-not-exists
+        - php bin/console doctrine:schema:update --env=test --dump-sql --force
+        - php bin/console doctrine:fixtures:load --env=test -n
+
+test:app:
+    stage: test
+
+    cache:
+        <<: *global_cache
+        policy: pull-push
+
+    services:
+        - name: mariadb:10.5.21
+          command: [ "--default-authentication-plugin=mysql_native_password" ]
+
+    only:
+        - /^.*test.*$/
+        - merge_requests
+        - develop
+
+    script:
+        - ./vendor/bin/php-cs-fixer fix -v --dry-run --stop-on-violation
+        - rm -rf .env.test.local
+        - cp .env.test .env.test.local
+        - rm -rf .env.local
+        - cp .env.test .env.local
+        - rm -rf .env
+        - cp .env.test .env
+        - npm install
+        - npm run build
+        - ping -c 3 $DATABASE_HOST
+        - php bin/console doctrine:database:create --env=test --if-not-exists
+        - php bin/console doctrine:schema:update --env=test --force
+        - php bin/console doctrine:fixtures:load -n --env=test
+        - >
+            if [[ $CI_COMMIT_REF_NAME = develop ]] || [[ $CI_COMMIT_REF_NAME =~ .*coverage.* ]]; then
+              SYMFONY_DEPRECATIONS_HELPER=disabled XDEBUG_MODE=coverage vendor/bin/phpunit -d xdebug.mode=coverage --configuration phpunit.xml.dist --coverage-text --log-junit report.xml
+            else
+              SYMFONY_DEPRECATIONS_HELPER=disabled ./vendor/bin/phpunit -d xdebug.mode=coverage --configuration phpunit.xml.dist --log-junit report.xml
+            fi
+
+    coverage: '/^\s*Lines:\s*\d+.\d+\%/'
+
+    artifacts:
+        when: always
+        name: "TEST-REPORT-${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}"
+        paths:
+            - tests-output
+            - report.xml
+        reports:
+            junit: report.xml
+
+pack:app:
+    stage: pack
+
+    cache:
+        <<: *global_cache
+        policy: pull-push
+
+    only:
+        - /^(release\/)?\d+\.\d+\.\d+(-rc\d+)?$/ # allows refs (tag or branch) looking EXACTLY like "(release/)12.1.32(-rc12)" WHERE (release/) and (-rc12) are optional
+        - /^.*staging.*$/ # allows refs (tag or branch) containing the word "staging"
+        - /^.*pack.*$/
+
+    script:
+        - npm install
+        - npm run build
+        - php bin/console assets:install public
+        - > # ONLY refs (tag or branch) looking EXACTLY like "12.1.32" WILL BE A RELEASE !
+            if [[ $CI_COMMIT_TAG =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              ARTIFACT_TYPE=release
+              ARTIFACT_BRANCH=main
+            elif [[ $CI_COMMIT_TAG =~ staging ]]; then
+              ARTIFACT_TYPE=staging
+              ARTIFACT_BRANCH=staging
+            else
+              ARTIFACT_TYPE=release-candidate
+              ARTIFACT_BRANCH=release-candidate
+            fi
+        - mkdir -p ~/.ssh
+        - chmod 700 ~/.ssh
+        - chmod 400 "$CI_SSH_ARTIFACT_PRIVATE_KEY"
+        - eval "$(ssh-agent)"
+        - ssh-add "$CI_SSH_ARTIFACT_PRIVATE_KEY"
+        - cat "$CI_SSH_ARTIFACT_PRIVATE_KEY" >> ~/.ssh/id_ed25519
+        - ssh-keyscan gitlab.distantaccess.com >> ~/.ssh/known_hosts
+        - chmod 644 ~/.ssh/known_hosts
+        - git config --global user.email "$GITLAB_USER_EMAIL"
+        - git config --global user.name "$GITLAB_USER_NAME"
+        - git config --global --get user.email
+        - echo "HOST gitlab.distantaccess.com" > ~/.ssh/config
+        - echo "HostName gitlab.distantaccess.com" >> ~/.ssh/config
+        - echo "IdentityFile /home/root/.ssh/id_ed25519" >> ~/.ssh/config
+        - echo "UserKnownHostsFile /home/root/.ssh/known_hosts" >> ~/.ssh/config
+        - cp ~/.ssh/config /etc/ssh/ssh_config.d/config.conf
+        - git clone $ARTIFACT_REPO --branch $ARTIFACT_BRANCH artifact-repo --verbose
+        - mkdir ${CI_PROJECT_DIR}/dist
+        - mkdir ${CI_PROJECT_DIR}/dist/assets
+        - mkdir ${CI_PROJECT_DIR}/dist/assets/img
+        - mv assets/NUTS_RG_01M_2013_4326.geojson ${CI_PROJECT_DIR}/dist/assets/.
+        - mv assets/NUTS_RG_01M_2021_4326.geojson ${CI_PROJECT_DIR}/dist/assets/.
+        - mv artifact-repo/.git ${CI_PROJECT_DIR}/dist/
+        - set +e
+        - mv .gitignore ${CI_PROJECT_DIR}/dist/.gitignore
+        - mv bin ${CI_PROJECT_DIR}/dist/
+        - mv config ${CI_PROJECT_DIR}/dist/
+        - mv fixtures ${CI_PROJECT_DIR}/dist/
+        - mv migrations ${CI_PROJECT_DIR}/dist/
+        - mv public ${CI_PROJECT_DIR}/dist/
+        - mv ci/.htaccess ${CI_PROJECT_DIR}/dist/public/.htaccess
+        - mv src ${CI_PROJECT_DIR}/dist/
+        - mv templates ${CI_PROJECT_DIR}/dist/
+        - mv translations ${CI_PROJECT_DIR}/dist/
+        - mv vendor ${CI_PROJECT_DIR}/dist/
+        - rm -rf ${CI_PROJECT_DIR}/dist/vendor/bin/.phpunit
+        - rm -rf ${CI_PROJECT_DIR}/dist/vendor/**/.git
+        - find ${CI_PROJECT_DIR}/dist/vendor/ -type d -name ".git" -exec rm -rf {} \;
+        - mv .env ${CI_PROJECT_DIR}/dist/
+        - mv .php-version ${CI_PROJECT_DIR}/dist/
+        - mv ../CHANGELOG.md ${CI_PROJECT_DIR}/dist/
+        - mv composer.json ${CI_PROJECT_DIR}/dist/
+        - mv composer.lock ${CI_PROJECT_DIR}/dist/
+        - mv symfony.lock ${CI_PROJECT_DIR}/dist/
+        - mv package.json ${CI_PROJECT_DIR}/dist/
+        - mv yarn.lock ${CI_PROJECT_DIR}/dist/
+        - mv ../README.md ${CI_PROJECT_DIR}/dist/
+        - cd ${CI_PROJECT_DIR}/dist
+        - git add . --verbose
+        - git commit --all --cleanup=whitespace --allow-empty --message "source revision $CI_COMMIT_SHORT_SHA, ref $CI_COMMIT_REF_NAME, type $ARTIFACT_TYPE, branch $ARTIFACT_BRANCH" --verbose
+        - git push --verbose
+        - >
+            if [[ $ARTIFACT_TYPE = release ]]; then
+              git tag -d $CI_COMMIT_TAG
+              git push origin --delete $CI_COMMIT_TAG
+              git tag $CI_COMMIT_TAG
+              git push origin $CI_COMMIT_TAG
+            fi
+        - set -e
+
+    artifacts:
+        name: "${CI_PROJECT_NAME}_${CI_COMMIT_REF_NAME}_${CI_COMMIT_SHORT_SHA}"
+        paths:
+            - ${CI_PROJECT_DIR}/dist/bin
+            - ${CI_PROJECT_DIR}/dist/config
+            - ${CI_PROJECT_DIR}/dist/fixtures
+            - ${CI_PROJECT_DIR}/dist/migrations
+            - ${CI_PROJECT_DIR}/dist/public
+            - ${CI_PROJECT_DIR}/dist/src
+            - ${CI_PROJECT_DIR}/dist/templates
+            - ${CI_PROJECT_DIR}/dist/translations
+            - ${CI_PROJECT_DIR}/dist/vendor
+            - ${CI_PROJECT_DIR}/dist/.env
+            - ${CI_PROJECT_DIR}/dist/.gitignore
+            - ${CI_PROJECT_DIR}/dist/.php-version
+            - ${CI_PROJECT_DIR}/dist/CHANGELOG.md
+            - ${CI_PROJECT_DIR}/dist/composer.json
+            - ${CI_PROJECT_DIR}/dist/package.json
+            - ${CI_PROJECT_DIR}/dist/README.md
