@@ -3,3 +3,19 @@ data
 symfony/var/cache
 symfony/var/log
 symfony/vendor
+
+###> friendsofphp/php-cs-fixer ###
+symfony/.php-cs-fixer.php
+symfony/.php-cs-fixer.cache
+###< friendsofphp/php-cs-fixer ###
+
+###> phpstan/phpstan ###
+symfony/phpstan.neon
+###< phpstan/phpstan ###
+
+###> symfony/webpack-encore-bundle ###
+symfony/node_modules/
+symfony/public/build/
+symfony/npm-debug.log
+symfony/yarn-error.log
+###< symfony/webpack-encore-bundle ###
