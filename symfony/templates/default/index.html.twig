@@ -1,0 +1,11 @@
+{% extends 'base.html.twig' %}
+
+{% block title %}Map and list of mobile operator antennae in Swiss Confederation{% endblock %}
+
+{% block body %}
+
+<div class="example-wrapper d-flex">
+    {{ ux_map(map, { style: 'height: 600px' }) }}
+    {{ form(form) }}
+</div>
+{% endblock %}

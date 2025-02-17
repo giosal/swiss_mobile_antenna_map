@@ -1,5 +1,6 @@
 .idea
 data
+logs
 symfony/var/cache
 symfony/var/log
 symfony/vendor
